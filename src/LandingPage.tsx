@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 
 function Brand() {
-  return <a className="landing-brand" href="/" aria-label="Tradence home"><img src="/tradence-icon-v3.png" alt=""/><strong>Tradence<span>.</span></strong></a>
+  return <a className="landing-brand" href="/" aria-label="Tradence home"><span className="landing-brand-mark"><img src="/tradence-icon-v3.png" alt=""/></span><strong>Tradence<span>.</span></strong></a>
 }
 
 function ArrowIcon() {
@@ -62,6 +62,7 @@ function LandingPage() {
   const [isDragging, setIsDragging] = useState(false)
   const [dragOffset, setDragOffset] = useState(0)
   const dragStart = useRef<number | null>(null)
+  const showcaseRef = useRef<HTMLElement | null>(null)
 
   const changeToolSlide = (direction: number) => setToolSlide((current) => (current + direction + toolSlides.length) % toolSlides.length)
   const startToolDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -82,6 +83,23 @@ function LandingPage() {
     setDragOffset(0)
     setIsDragging(false)
     window.setTimeout(() => setCarouselPaused(false), 700)
+  }
+  const selectShowcaseStep = (index: number) => {
+    setShowcaseStep(index)
+    const showcase = showcaseRef.current
+    if (!showcase || window.matchMedia('(max-width: 740px)').matches) return
+    const sectionTop = window.scrollY + showcase.getBoundingClientRect().top
+    const travel = Math.max(0, showcase.offsetHeight - window.innerHeight)
+    window.scrollTo({ top: sectionTop + travel * (index / 2), behavior: 'smooth' })
+  }
+
+  const moveFeatureGlow = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const card = (event.target as HTMLElement).closest<HTMLElement>('.feature-card')
+    if (!card) return
+
+    const bounds = card.getBoundingClientRect()
+    card.style.setProperty('--feature-x', `${event.clientX - bounds.left}px`)
+    card.style.setProperty('--feature-y', `${event.clientY - bounds.top}px`)
   }
 
   useEffect(() => {
@@ -108,12 +126,25 @@ function LandingPage() {
 
   useEffect(() => {
     const landing = document.querySelector<HTMLElement>('.landing-page')
-    const showcase = document.querySelector<HTMLElement>('.scroll-showcase')
-    if (!landing || !showcase || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    const showcase = showcaseRef.current
+    if (!landing || !showcase) return
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     let frame = 0
+    let previousScroll = window.scrollY
     const update = () => {
       frame = 0
-      landing.style.setProperty('--landing-scroll', `${Math.min(window.scrollY, 900)}px`)
+      const currentScroll = window.scrollY
+      const pageTravel = Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+      landing.style.setProperty('--page-progress', `${Math.min(1, currentScroll / pageTravel)}`)
+      landing.classList.toggle('is-scrolled', currentScroll > 24)
+      landing.style.setProperty('--landing-scroll', `${Math.min(currentScroll, 900)}px`)
+      if (window.innerWidth > 740 && Math.abs(currentScroll - previousScroll) > 5) {
+        landing.classList.toggle('nav-hidden', currentScroll > previousScroll && currentScroll > 180)
+        previousScroll = currentScroll
+      } else if (window.innerWidth <= 740) {
+        landing.classList.remove('nav-hidden')
+      }
+      if (reduceMotion) return
       const bounds = showcase.getBoundingClientRect()
       const travel = Math.max(1, bounds.height - window.innerHeight)
       const progress = Math.min(1, Math.max(0, -bounds.top / travel))
@@ -158,6 +189,7 @@ function LandingPage() {
   }, [carouselPaused])
 
   return <div className="landing-page">
+    <div className="landing-progress" aria-hidden="true"><i/></div>
     <header className="landing-nav"><Brand/><nav className={menuOpen ? 'open' : ''}><a href="#features" onClick={() => setMenuOpen(false)}>Features</a><a href="#workflow" onClick={() => setMenuOpen(false)}>How it works</a><a href="#privacy" onClick={() => setMenuOpen(false)}>Privacy</a><a href="#faq" onClick={() => setMenuOpen(false)}>FAQ</a></nav><a className="nav-cta" href="/app">Open journal <ArrowIcon/></a><button className="menu-toggle" aria-label="Toggle menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><i/><i/><i/></button></header>
 
     <main>
@@ -167,13 +199,13 @@ function LandingPage() {
 
       <section className="story-section" data-reveal><div className="section-kicker">THE REAL ADVANTAGE</div><h2>Your strategy is only as good as the process behind it.</h2><p>A winning trade can hide a bad decision. A losing trade can come from a perfect execution. Tradence helps you separate outcome from process.</p><div className="story-numbers"><div><strong>01</strong><h3>Record the context</h3><p>Capture setup, session, risk, psychology, screenshots, and the reason behind the trade.</p></div><div><strong>02</strong><h3>Find the pattern</h3><p>See which pairs, sessions, setups, and behaviours consistently shape your results.</p></div><div><strong>03</strong><h3>Refine the process</h3><p>Turn repeated observations into rules you can measure and execute with discipline.</p></div></div></section>
 
-      <section className="scroll-showcase">
+      <section className="scroll-showcase" ref={showcaseRef}>
         <div className="showcase-sticky">
           <div className="showcase-copy"><div className="section-kicker">SCROLL THROUGH THE PROCESS</div><h2>From a single trade to a clearer decision.</h2><p>The workspace changes with the way you review. Scroll to move through the Tradence workflow.</p><div className="showcase-progress"><i style={{ height: `${((showcaseStep + 1) / 3) * 100}%` }}/>{[
             ['01','Journal the decision','Keep the plan, execution, psychology, and result connected.'],
             ['02','Read the evidence','Turn closed trades into patterns you can actually compare.'],
             ['03','Protect the process','Measure every trade against the rules you decided beforehand.'],
-          ].map(([number, title, copy], index) => <button className={showcaseStep === index ? 'active' : ''} key={number} type="button"><b>{number}</b><span><strong>{title}</strong><small>{copy}</small></span></button>)}</div></div>
+          ].map(([number, title, copy], index) => <button className={showcaseStep === index ? 'active' : ''} key={number} type="button" onClick={() => selectShowcaseStep(index)}><b>{number}</b><span><strong>{title}</strong><small>{copy}</small></span></button>)}</div></div>
           <div className="showcase-visual">
             <div className="showcase-ambient"/>
             <article className={`showcase-screen journal-screen ${showcaseStep === 0 ? 'active' : showcaseStep > 0 ? 'before' : 'after'}`}><div className="screen-top"><span>Trade review</span><em>EURUSD · BUY</em></div><div className="review-score"><div><small>NET P/L</small><strong>+$428.50</strong></div><div><small>ACTUAL R</small><strong>+2.14R</strong></div><div><small>PLAN</small><strong>Followed</strong></div></div><div className="review-chart"><svg viewBox="0 0 620 190" preserveAspectRatio="none"><path d="M0 145 C70 140 86 154 140 123 S214 131 260 96 S336 108 380 69 S458 78 506 42 S574 56 620 18"/><path className="target-line" d="M0 48H620"/><path className="entry-line" d="M0 128H620"/></svg><span className="chart-label target">TP</span><span className="chart-label entry">ENTRY</span></div><div className="review-footer"><span>Liquidity sweep</span><span>London</span><span>Calm</span><b>✓ All rules passed</b></div></article>
@@ -199,13 +231,13 @@ function LandingPage() {
         <div className="carousel-dots" role="tablist" aria-label="Feature slides">{toolSlides.map((slide,index) => <button key={slide.type} className={toolSlide === index ? 'active' : ''} type="button" role="tab" aria-selected={toolSlide === index} aria-label={`Show ${slide.title}`} onClick={() => setToolSlide(index)}/>)}</div>
       </section>
 
-      <section className="features-section" id="features"><div className="section-heading" data-reveal><div><div className="section-kicker">ONE FOCUSED WORKSPACE</div><h2>Everything you need to review the trade—not chase the next one.</h2></div><p>Designed around reflection, discipline, and decisions that can be measured.</p></div><div className="feature-grid">
-        <article className="feature-card feature-large" data-reveal><div className="feature-icon"><FeatureIcon type="journal"/></div><span>DEEP REVIEW</span><h3>A journal built around decisions</h3><p>Record the plan, execution, confluences, psychology, mistakes, costs, and result in one structured review.</p><div className="mini-journal"><div><i className="buy">BUY</i><strong>EURUSD</strong><span>London · M15</span></div><div className="journal-line"><span>Setup quality</span><b>Strong</b></div><div className="journal-line"><span>Plan followed</span><b className="green">✓ Yes</b></div><div className="journal-tags"><i>Liquidity sweep</i><i>FVG</i><i>HTF bias</i></div></div></article>
-        <article className="feature-card" data-reveal><div className="feature-icon"><FeatureIcon type="analytics"/></div><span>ANALYTICS</span><h3>Patterns, not assumptions</h3><p>Compare performance by symbol, session, and setup using your own closed trades.</p><div className="mini-bars"><i style={{height:'42%'}}/><i style={{height:'66%'}}/><i style={{height:'51%'}}/><i style={{height:'84%'}}/><i style={{height:'72%'}}/><i style={{height:'96%'}}/></div></article>
-        <article className="feature-card" data-reveal><div className="feature-icon"><FeatureIcon type="rules"/></div><span>DISCIPLINE</span><h3>Rules before emotion</h3><p>Check risk, planned R:R, daily entries, daily loss, and confluences before saving.</p><div className="rule-preview"><div><i>✓</i><span>Risk within limit</span></div><div><i>✓</i><span>Minimum R:R reached</span></div><div><i>✓</i><span>Confluence confirmed</span></div></div></article>
-        <article className="feature-card feature-visual-card" data-reveal><div className="feature-icon"><FeatureIcon type="calendar"/></div><span>CALENDAR</span><h3>See every trading day</h3><p>Review daily realised results and jump straight into the trades behind each number.</p><div className="calendar-preview"><div className="calendar-head">September performance <span>+$2,184</span></div><div className="calendar-grid">{['1','2','3','4','5','6','7','8','9','10','11','12','13','14'].map((day, index) => <i key={day} className={index === 10 ? 'today' : [1,3,7,9,12].includes(index) ? 'profit' : [4,11].includes(index) ? 'loss' : ''}>{day}</i>)}</div></div></article>
-        <article className="feature-card feature-visual-card" data-reveal><div className="feature-icon"><FeatureIcon type="mind"/></div><span>PSYCHOLOGY</span><h3>Track the trader, too</h3><p>Log FOMO, fear, confidence, revenge, and recurring mistakes alongside performance.</p><div className="mind-preview"><div className="mind-meter"><span>Confidence</span><i><b style={{width:'82%'}}/></i><strong>8.2</strong></div><div className="mind-meter"><span>Patience</span><i><b style={{width:'68%'}}/></i><strong>6.8</strong></div><div className="mind-meter"><span>Impulse</span><i><b style={{width:'24%'}}/></i><strong>2.4</strong></div><div className="mind-summary"><span>Best state</span><strong>Calm + prepared</strong></div></div></article>
-        <article className="feature-card feature-visual-card" data-reveal><div className="feature-icon"><FeatureIcon type="image"/></div><span>SCREENSHOTS</span><h3>Before and after, together</h3><p>Keep your entry thesis and exit review visually connected to the same trade.</p><div className="compare-preview"><div className="compare-chart"><span>BEFORE</span></div><div className="compare-chart after"><span>AFTER · +2.4R</span></div></div></article>
+      <section className="features-section" id="features"><div className="section-heading" data-reveal><div><div className="section-kicker">ONE FOCUSED WORKSPACE</div><h2>Everything you need to review the trade—not chase the next one.</h2></div><p>Designed around reflection, discipline, and decisions that can be measured.</p></div><div className="feature-grid" onPointerMove={moveFeatureGlow}>
+        <article className="feature-card feature-large" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="journal"/></div><span>DEEP REVIEW</span><h3>A journal built around decisions</h3><p>Record the plan, execution, confluences, psychology, mistakes, costs, and result in one structured review.</p><div className="mini-journal"><div><i className="buy">BUY</i><strong>EURUSD</strong><span>London · M15</span></div><div className="journal-line"><span>Setup quality</span><b>Strong</b></div><div className="journal-line"><span>Plan followed</span><b className="green">✓ Yes</b></div><div className="journal-tags"><i>Liquidity sweep</i><i>FVG</i><i>HTF bias</i></div></div></article>
+        <article className="feature-card" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="analytics"/></div><span>ANALYTICS</span><h3>Patterns, not assumptions</h3><p>Compare performance by symbol, session, and setup using your own closed trades.</p><div className="mini-bars"><i style={{height:'42%'}}/><i style={{height:'66%'}}/><i style={{height:'51%'}}/><i style={{height:'84%'}}/><i style={{height:'72%'}}/><i style={{height:'96%'}}/></div></article>
+        <article className="feature-card" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="rules"/></div><span>DISCIPLINE</span><h3>Rules before emotion</h3><p>Check risk, planned R:R, daily entries, daily loss, and confluences before saving.</p><div className="rule-preview"><div><i>✓</i><span>Risk within limit</span></div><div><i>✓</i><span>Minimum R:R reached</span></div><div><i>✓</i><span>Confluence confirmed</span></div></div></article>
+        <article className="feature-card feature-visual-card" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="calendar"/></div><span>CALENDAR</span><h3>See every trading day</h3><p>Review daily realised results and jump straight into the trades behind each number.</p><div className="calendar-preview"><div className="calendar-head">September performance <span>+$2,184</span></div><div className="calendar-grid">{['1','2','3','4','5','6','7','8','9','10','11','12','13','14'].map((day, index) => <i key={day} className={index === 10 ? 'today' : [1,3,7,9,12].includes(index) ? 'profit' : [4,11].includes(index) ? 'loss' : ''}>{day}</i>)}</div></div></article>
+        <article className="feature-card feature-visual-card" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="mind"/></div><span>PSYCHOLOGY</span><h3>Track the trader, too</h3><p>Log FOMO, fear, confidence, revenge, and recurring mistakes alongside performance.</p><div className="mind-preview"><div className="mind-meter"><span>Confidence</span><i><b style={{width:'82%'}}/></i><strong>8.2</strong></div><div className="mind-meter"><span>Patience</span><i><b style={{width:'68%'}}/></i><strong>6.8</strong></div><div className="mind-meter"><span>Impulse</span><i><b style={{width:'24%'}}/></i><strong>2.4</strong></div><div className="mind-summary"><span>Best state</span><strong>Calm + prepared</strong></div></div></article>
+        <article className="feature-card feature-visual-card" data-reveal tabIndex={0}><div className="feature-icon"><FeatureIcon type="image"/></div><span>SCREENSHOTS</span><h3>Before and after, together</h3><p>Keep your entry thesis and exit review visually connected to the same trade.</p><div className="compare-preview"><div className="compare-chart"><span>BEFORE</span></div><div className="compare-chart after"><span>AFTER · +2.4R</span></div></div></article>
       </div></section>
 
       <section className="workflow-section" id="workflow"><div className="workflow-copy" data-reveal><div className="section-kicker">A BETTER REVIEW LOOP</div><h2>Four steps. One repeatable rhythm.</h2><p>Tradence keeps the workflow simple enough to use after every session—and structured enough to reveal meaningful patterns.</p><a href="/app">Start your first review <ArrowIcon/></a></div><div className="workflow-steps" data-reveal>{[['01','Plan','Define entry, invalidation, target, and risk.'],['02','Execute','Record what happened without rewriting the plan.'],['03','Review','Compare the decision with the result and your rules.'],['04','Improve','Carry one clear lesson into the next session.']].map(([number, title, copy]) => <div key={number}><strong>{number}</strong><span><b>{title}</b><small>{copy}</small></span></div>)}</div></section>

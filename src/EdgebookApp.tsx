@@ -7,6 +7,9 @@ const defaultState: JournalState = { trades: [], initial: 10000, rules: defaultR
 const STORAGE_KEY = 'edgebook-journal-v1'
 const DATABASE_NAME = 'edgebook-react'
 const THEME_KEY = 'tradence-theme'
+const DEMO_READY_KEY = 'tradence-demo-ready-v1'
+const DEMO_VERSION_KEY = 'tradence-demo-version'
+const DEMO_VERSION = '2'
 type Theme = 'light' | 'dark'
 
 const viewMeta: Record<View, { title: string; copy: string }> = {
@@ -32,9 +35,17 @@ function number(value: number | null) {
 function readState(): JournalState {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) return defaultState
-    const parsed = JSON.parse(saved) as JournalState
-    return parsed.trades && parsed.rules ? parsed : defaultState
+    const parsed = saved ? JSON.parse(saved) as JournalState : defaultState
+    const state = parsed.trades && parsed.rules ? parsed : defaultState
+    const isDemoDataset = state.trades.length > 0 && state.trades.every((trade) => trade.id.startsWith('demo-'))
+    if (isDemoDataset && localStorage.getItem(DEMO_VERSION_KEY) !== DEMO_VERSION) {
+      localStorage.setItem(DEMO_VERSION_KEY, DEMO_VERSION)
+      return { ...state, trades: createDemoTrades() }
+    }
+    if (state.trades.length || localStorage.getItem(DEMO_READY_KEY) === 'yes') return state
+    localStorage.setItem(DEMO_READY_KEY, 'yes')
+    localStorage.setItem(DEMO_VERSION_KEY, DEMO_VERSION)
+    return { ...state, trades: createDemoTrades() }
   } catch {
     return defaultState
   }
@@ -121,7 +132,25 @@ function groupDate(date: Date, grouping: ChartGrouping) {
 }
 
 function axisMoney(value: number) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(value)
+  const absolute = Math.abs(value)
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    notation: absolute >= 1000 ? 'compact' : 'standard',
+    maximumFractionDigits: absolute < 10 ? 2 : absolute < 100 ? 1 : 0,
+  }).format(value)
+}
+
+function niceChartScale(minimum: number, maximum: number, tickCount = 5) {
+  const range = Math.max(maximum - minimum, 1)
+  const roughStep = range / Math.max(1, tickCount - 1)
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep))
+  const normalized = roughStep / magnitude
+  const niceStep = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 2.5 ? 2.5 : normalized <= 5 ? 5 : 10) * magnitude
+  const low = Math.floor(minimum / niceStep) * niceStep
+  const high = Math.ceil(maximum / niceStep) * niceStep
+  const ticks = Array.from({ length: Math.round((high - low) / niceStep) + 1 }, (_, index) => high - index * niceStep)
+  return { low, high, ticks }
 }
 
 function EquityChart({ trades, initial }: { trades: Trade[]; initial: number }) {
@@ -482,9 +511,209 @@ function AnalyticsTable({ trades, group, label }: { trades: Trade[]; group: 'sym
   })}</tbody></table></div> : <div className="empty">Belum ada trade closed untuk dianalisis.</div>}</section>
 }
 
+type AnalyticsPeriod = '30D' | '3M' | 'ALL'
+
+type AnalyticsPoint = {
+  label: string
+  detailLabel: string
+  value: number
+  pnl: number
+  timestamp: number
+  symbol: string | null
+  direction: Direction | null
+}
+
+function AnalyticsCharts({ trades }: { trades: Trade[] }) {
+  const [period, setPeriod] = useState<AnalyticsPeriod>('30D')
+  const [hovered, setHovered] = useState<number | null>(null)
+  const chartRef = useRef<SVGSVGElement>(null)
+  const [chartSize, setChartSize] = useState({ width: 720, height: 300 })
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const updateSize = () => {
+      const width = Math.round(chart.clientWidth)
+      const height = Math.round(chart.clientHeight)
+      if (width > 0 && height > 0) setChartSize((current) => current.width === width && current.height === height ? current : { width, height })
+    }
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(chart)
+    return () => observer.disconnect()
+  }, [])
+  const analysis = useMemo(() => {
+    const now = new Date()
+    now.setHours(23, 59, 59, 999)
+    const cutoff = new Date()
+    cutoff.setHours(0, 0, 0, 0)
+    if (period === '30D') cutoff.setDate(cutoff.getDate() - 29)
+    if (period === '3M') cutoff.setMonth(cutoff.getMonth() - 3)
+    const filtered = trades
+      .filter((trade) => period === 'ALL' || parseTradeDate(trade.closedAt) >= cutoff)
+      .sort((a, b) => a.closedAt.localeCompare(b.closedAt))
+    const firstDate = filtered[0] ? parseTradeDate(filtered[0].closedAt) : cutoff
+    const lastDate = filtered.at(-1) ? parseTradeDate(filtered.at(-1)!.closedAt) : now
+    const rangeStart = period === 'ALL' ? new Date(firstDate) : cutoff
+    if (period === 'ALL') rangeStart.setDate(rangeStart.getDate() - 1)
+    const rangeEnd = period === 'ALL' ? new Date(lastDate) : now
+    if (period === 'ALL') rangeEnd.setHours(23, 59, 59, 999)
+    if (rangeEnd.getTime() <= rangeStart.getTime()) rangeEnd.setDate(rangeEnd.getDate() + 1)
+    let cumulative = 0
+    const points: AnalyticsPoint[] = [{
+      label: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }).format(rangeStart),
+      detailLabel: 'Opening baseline',
+      value: 0,
+      pnl: 0,
+      timestamp: rangeStart.getTime(),
+      symbol: null,
+      direction: null,
+    }]
+    filtered.forEach((trade) => {
+      const pnl = calculate(trade).pnl ?? 0
+      const closedDate = new Date(trade.closedAt)
+      cumulative += pnl
+      points.push({
+        label: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }).format(closedDate),
+        detailLabel: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(closedDate),
+        value: cumulative,
+        pnl,
+        timestamp: closedDate.getTime(),
+        symbol: trade.symbol,
+        direction: trade.direction,
+      })
+    })
+    const outcomes = ['WIN', 'LOSS', 'BE'].map((result) => ({ result, count: filtered.filter((trade) => calculate(trade).result === result).length }))
+    const sessions = [...new Set(filtered.map((trade) => trade.session))].map((session) => {
+      const group = filtered.filter((trade) => trade.session === session)
+      const stats = getStats(group, 0)
+      return { session, pnl: stats.pnl, winRate: stats.winRate, count: group.length }
+    }).sort((a, b) => b.pnl - a.pnl)
+    const tradePnls = filtered.map((trade) => calculate(trade).pnl ?? 0)
+    const drawdownState = tradePnls.reduce((state, pnl, index) => {
+      const runningPnl = state.runningPnl + pnl
+      const peakPnl = Math.max(state.peakPnl, runningPnl)
+      const value = peakPnl - runningPnl
+      return {
+        runningPnl,
+        peakPnl,
+        maxDrawdown: Math.max(state.maxDrawdown, value),
+        drawdowns: [...state.drawdowns, { value, label: points[index + 1].label, symbol: filtered[index].symbol }],
+      }
+    }, { runningPnl: 0, peakPnl: 0, maxDrawdown: 0, drawdowns: [] as { value: number; label: string; symbol: string }[] })
+    const tradeBars = filtered.slice(-12).map((trade) => ({
+      label: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }).format(parseTradeDate(trade.closedAt)),
+      symbol: trade.symbol,
+      value: calculate(trade).pnl ?? 0,
+    }))
+    return {
+      filtered, points, outcomes, sessions, cumulative,
+      bestTrade: tradePnls.length ? Math.max(...tradePnls) : 0,
+      averageTrade: filtered.length ? cumulative / filtered.length : 0,
+      maxDrawdown: drawdownState.maxDrawdown, drawdowns: drawdownState.drawdowns, tradeBars,
+      rangeStart: rangeStart.getTime(), rangeEnd: rangeEnd.getTime(),
+      startLabel: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }).format(rangeStart),
+      endLabel: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }).format(rangeEnd),
+    }
+  }, [period, trades])
+
+  const values = analysis.points.map((point) => point.value)
+  const rawLow = Math.min(0, ...values)
+  const rawHigh = Math.max(0, ...values)
+  const rawSpan = rawHigh - rawLow
+  const padding = Math.max(rawSpan * .1, rawSpan === 0 ? 10 : 1)
+  const scale = niceChartScale(rawLow < 0 ? rawLow - padding : 0, rawHigh > 0 ? rawHigh + padding : rawLow < 0 ? 0 : 100)
+  const { low, high } = scale
+  const span = high - low || 1
+  const plot = { left: chartSize.width < 520 ? 49 : 62, right: chartSize.width - 18, top: 23, bottom: chartSize.height - 38 }
+  const timeSpan = Math.max(1, analysis.rangeEnd - analysis.rangeStart)
+  const coordinates = analysis.points.map((point) => ({
+    ...point,
+    x: plot.left + Math.max(0, Math.min(1, (point.timestamp - analysis.rangeStart) / timeSpan)) * (plot.right - plot.left),
+    y: plot.bottom - ((point.value - low) / span) * (plot.bottom - plot.top),
+  }))
+  const zeroY = plot.bottom - ((0 - low) / span) * (plot.bottom - plot.top)
+  const curveCoordinates = coordinates.at(-1)!.x < plot.right
+    ? [...coordinates, { ...coordinates.at(-1)!, x: plot.right }]
+    : coordinates
+  const curveSegments = curveCoordinates.slice(1).map((point, index) => {
+    const previous = curveCoordinates[index]
+    const midpoint = previous.x + (point.x - previous.x) / 2
+    return `C${midpoint} ${previous.y}, ${midpoint} ${point.y}, ${point.x} ${point.y}`
+  }).join(' ')
+  const curvePath = `M${curveCoordinates[0].x} ${curveCoordinates[0].y} ${curveSegments}`
+  const areaPath = `M${curveCoordinates[0].x} ${zeroY} V${curveCoordinates[0].y} ${curveSegments} V${zeroY} Z`
+  const active = hovered === null ? coordinates.at(-1)! : coordinates[hovered]
+  const xTickCount = chartSize.width < 520 ? 3 : 5
+  const showTickYear = analysis.rangeEnd - analysis.rangeStart > 300 * 24 * 60 * 60 * 1000
+  const xTicks = Array.from({ length: xTickCount }, (_, index) => {
+    const ratio = index / (xTickCount - 1)
+    const timestamp = analysis.rangeStart + (analysis.rangeEnd - analysis.rangeStart) * ratio
+    return {
+      x: plot.left + (plot.right - plot.left) * ratio,
+      label: new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short', ...(showTickYear ? { year: '2-digit' as const } : {}) }).format(new Date(timestamp)),
+    }
+  })
+  const maxSessionPnl = Math.max(1, ...analysis.sessions.map((item) => Math.abs(item.pnl)))
+  const totalOutcomes = Math.max(1, analysis.outcomes.reduce((sum, item) => sum + item.count, 0))
+  const wins = analysis.outcomes.find((item) => item.result === 'WIN')?.count ?? 0
+  const losses = analysis.outcomes.find((item) => item.result === 'LOSS')?.count ?? 0
+  const winAngle = (wins / totalOutcomes) * 360
+  const lossAngle = winAngle + (losses / totalOutcomes) * 360
+  const donutBackground = analysis.filtered.length ? `conic-gradient(#00b987 0deg ${winAngle}deg, #e05261 ${winAngle}deg ${lossAngle}deg, #d7a93b ${lossAngle}deg 360deg)` : '#dce7ec'
+  const move = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const x = ((event.clientX - rect.left) / rect.width) * chartSize.width
+    const nearest = coordinates.reduce((best, point, index) => Math.abs(point.x - x) < Math.abs(coordinates[best].x - x) ? index : best, 0)
+    setHovered(nearest)
+  }
+  const tradeBarScale = Math.max(1, ...analysis.tradeBars.map((item) => Math.abs(item.value)))
+  const drawdownScale = Math.max(1, analysis.maxDrawdown)
+
+  return <section className="analytics-overview">
+    <div className="analytics-overview-head"><div><span>PERFORMANCE VISUALS</span><h2>See what is driving your results.</h2><p>Hover the curve and compare outcomes or sessions without leaving Analytics.</p></div><div className="analytics-period-tabs">{(['30D','3M','ALL'] as AnalyticsPeriod[]).map((value) => <button type="button" className={period === value ? 'active' : ''} key={value} onClick={() => { setPeriod(value); setHovered(null) }}>{value}</button>)}</div></div>
+    <div className="analytics-visual-grid">
+      <article className="panel analytics-equity-card">
+        <div className="analytics-card-head"><div><span>CUMULATIVE NET P/L</span><strong className={analysis.cumulative >= 0 ? 'positive' : 'negative'}>{analysis.cumulative >= 0 ? '+' : ''}{money(analysis.cumulative)}</strong><small>{analysis.startLabel} - {analysis.endLabel} / realized P/L</small></div><em>{analysis.filtered.length} CLOSED TRADES</em></div>
+        <div className="analytics-chart-summary" aria-label="Ringkasan performa periode">
+          <div title="Profit terbesar dari satu closed trade"><span>BEST TRADE</span><strong className={analysis.bestTrade >= 0 ? 'positive' : 'negative'}>{analysis.bestTrade >= 0 ? '+' : ''}{money(analysis.bestTrade)}</strong><small>largest closed result</small></div>
+          <div title="Rata-rata realized P/L per closed trade"><span>AVG / TRADE</span><strong className={analysis.averageTrade >= 0 ? 'positive' : 'negative'}>{analysis.averageTrade >= 0 ? '+' : ''}{money(analysis.averageTrade)}</strong><small>per closed trade</small></div>
+          <div title="Penurunan terbesar dari puncak cumulative P/L"><span>MAX DRAWDOWN</span><strong className={analysis.maxDrawdown > 0 ? 'negative' : ''}>{analysis.maxDrawdown > 0 ? '-' : ''}{money(analysis.maxDrawdown)}</strong><small>from equity peak</small></div>
+        </div>
+        <div className="analytics-chart-shell">
+          <svg ref={chartRef} viewBox={`0 0 ${chartSize.width} ${chartSize.height}`} preserveAspectRatio="none" role="img" aria-label={`Grafik cumulative P/L periode ${period}`} onPointerMove={move} onPointerDown={move} onPointerLeave={() => setHovered(null)}>
+            <defs>
+              <linearGradient id="analyticsArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={analysis.cumulative >= 0 ? '#00c892' : '#e05261'} stopOpacity=".28"/><stop offset="1" stopColor={analysis.cumulative >= 0 ? '#00c892' : '#e05261'} stopOpacity=".015"/></linearGradient>
+              <linearGradient id="analyticsStroke" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stopColor={analysis.cumulative >= 0 ? '#15a983' : '#ca4656'}/><stop offset="1" stopColor={analysis.cumulative >= 0 ? '#28d6a5' : '#f17481'}/></linearGradient>
+            </defs>
+            {scale.ticks.map((value) => { const y = plot.bottom - ((value - low) / span) * (plot.bottom - plot.top); return <g key={value}><path className="analytics-grid-line" d={`M${plot.left} ${y}H${plot.right}`}/><text className="analytics-axis-label" x="2" y={y + 3}>{axisMoney(value)}</text></g> })}
+            {xTicks.map((tick, index) => <g key={tick.x}><path className="analytics-grid-line analytics-grid-vertical" d={`M${tick.x} ${plot.top}V${plot.bottom}`}/><text className="analytics-axis-label analytics-date-label" x={tick.x} y={chartSize.height - 9} textAnchor={index === 0 ? 'start' : index === xTicks.length - 1 ? 'end' : 'middle'}>{tick.label}</text></g>)}
+            <path className="analytics-zero-line" d={`M${plot.left} ${zeroY}H${plot.right}`}/>
+            {analysis.filtered.length > 0 && <><path className="analytics-chart-area" d={areaPath} fill="url(#analyticsArea)"/><path className="analytics-chart-line" d={curvePath} stroke="url(#analyticsStroke)" vectorEffect="non-scaling-stroke"/>{coordinates.slice(1).map((point, index) => <circle key={`${point.label}-${index}`} className={point.pnl < 0 ? 'analytics-dot loss' : point.pnl === 0 ? 'analytics-dot flat' : 'analytics-dot'} cx={point.x} cy={point.y} r="4" vectorEffect="non-scaling-stroke"><title>{point.symbol} {point.direction} / {point.pnl >= 0 ? '+' : ''}{money(point.pnl)}</title></circle>)}{hovered !== null && <line className="analytics-crosshair" x1={active.x} x2={active.x} y1={plot.top} y2={plot.bottom}/>}<circle className={`analytics-active-halo ${active.pnl < 0 ? 'loss' : ''}`} cx={active.x} cy={active.y} r="10" vectorEffect="non-scaling-stroke"/><circle className={`analytics-active-dot ${active.pnl < 0 ? 'loss' : ''}`} cx={active.x} cy={active.y} r="5" vectorEffect="non-scaling-stroke"/></>}
+          </svg>
+          {hovered !== null && <div className={`analytics-tooltip ${active.x < 150 ? 'at-start' : active.x > chartSize.width - 150 ? 'at-end' : ''}`} style={{ left: `${(active.x / chartSize.width) * 100}%`, top: `${(active.y / chartSize.height) * 100}%` }}><span>{active.detailLabel}</span><strong>{active.value >= 0 ? '+' : ''}{money(active.value)} <i>cumulative</i></strong><small className={active.pnl >= 0 ? 'positive' : 'negative'}>{active.symbol ? `${active.symbol} ${active.direction} / ${active.pnl >= 0 ? '+' : ''}${money(active.pnl)}` : 'Start of selected period'}</small></div>}
+          {analysis.filtered.length === 0 && <div className="analytics-chart-empty">Belum ada closed trade pada periode {period}.</div>}
+        </div>
+        <div className="analytics-chart-key" aria-hidden="true"><span><i className="line"/>Cumulative P/L</span><span><i className="profit"/>Profit</span><span><i className="loss"/>Loss</span><em>Closed trades only</em></div>
+      </article>
+      <article className="panel analytics-trade-card">
+        <div className="analytics-card-title analytics-card-title-row"><div><span>TRADE-BY-TRADE</span><h3>Individual P/L</h3></div><strong className={analysis.averageTrade >= 0 ? 'positive' : 'negative'}>{analysis.averageTrade >= 0 ? '+' : ''}{money(analysis.averageTrade)} avg</strong></div>
+        {analysis.tradeBars.length ? <div className="analytics-diverging-chart" aria-label="Grafik profit dan loss per trade"><i className="analytics-bar-baseline"/>{analysis.tradeBars.map((item, index) => <div className="analytics-trade-bar" key={`${item.symbol}-${item.label}-${index}`} title={`${item.symbol} · ${item.label} · ${money(item.value)}`}><b className={item.value < 0 ? 'loss' : item.value === 0 ? 'flat' : ''} style={{ height: `${Math.max(3, Math.abs(item.value) / tradeBarScale * 43)}%` }}/><small>{analysis.tradeBars.length <= 7 || index % 2 === 0 ? item.label : ''}</small></div>)}</div> : <div className="empty">Belum ada trade untuk divisualisasikan.</div>}
+        <div className="analytics-chart-note"><span><i className="win"/>Profit</span><span><i className="loss"/>Loss</span><em>12 trade terbaru</em></div>
+      </article>
+      <article className="panel analytics-drawdown-card">
+        <div className="analytics-card-title analytics-card-title-row"><div><span>RISK PROFILE</span><h3>Drawdown depth</h3></div><strong className="negative">{analysis.maxDrawdown > 0 ? '-' : ''}{money(analysis.maxDrawdown)}</strong></div>
+        {analysis.drawdowns.length ? <div className="analytics-drawdown-chart" aria-label="Grafik drawdown per trade"><i className="analytics-drawdown-baseline"/>{analysis.drawdowns.map((item, index) => <div className="analytics-drawdown-bar" key={`${item.symbol}-${item.label}-${index}`} title={`${item.symbol} · ${item.label} · drawdown ${money(item.value)}`}><b style={{ height: `${Math.max(2, item.value / drawdownScale * 78)}%` }}/><small>{item.symbol}</small></div>)}</div> : <div className="empty">Belum ada drawdown untuk dianalisis.</div>}
+        <div className="analytics-chart-note"><span><i className="risk"/>Jarak dari equity peak</span><em>Lebih pendek lebih baik</em></div>
+      </article>
+      <article className="panel analytics-outcome-card"><div className="analytics-card-title"><span>OUTCOME MIX</span><h3>Result quality</h3></div><div className="analytics-donut" style={{ background: donutBackground }}><div><strong>{analysis.filtered.length}</strong><span>trades</span></div></div><div className="analytics-legend">{analysis.outcomes.map((item) => <div key={item.result}><i className={item.result.toLowerCase()}/><span>{item.result === 'WIN' ? 'Wins' : item.result === 'LOSS' ? 'Losses' : 'Breakeven'}</span><strong>{item.count}</strong></div>)}</div></article>
+      <article className="panel analytics-session-card"><div className="analytics-card-title"><span>SESSION EDGE</span><h3>P/L by session</h3></div><div className="analytics-session-list">{analysis.sessions.length ? analysis.sessions.map((item) => <div key={item.session}><div><span>{item.session}</span><strong className={item.pnl >= 0 ? 'positive' : 'negative'}>{item.pnl >= 0 ? '+' : ''}{money(item.pnl)}</strong></div><i><b className={item.pnl < 0 ? 'loss' : ''} style={{ width: `${Math.max(5, Math.abs(item.pnl) / maxSessionPnl * 100)}%` }}/></i><small>{item.count} trades · {item.winRate.toFixed(0)}% win rate</small></div>) : <div className="empty">Belum ada session untuk dibandingkan.</div>}</div></article>
+    </div>
+  </section>
+}
+
 function AnalyticsView({ trades }: { trades: Trade[] }) {
   const done = trades.filter((trade) => calculate(trade).pnl !== null)
-  return <><div className="notice">Hanya trade closed. Trade dengan beberapa setup dihitung pada setiap tag; total antar-tag tidak dijumlahkan.</div><AnalyticsTable trades={done} group="symbol" label="Symbol"/><AnalyticsTable trades={done} group="session" label="Session"/><AnalyticsTable trades={done} group="setup" label="Setup tag"/></>
+  return <><div className="notice">Hanya trade closed. Gunakan grafik untuk membaca momentum performa, komposisi hasil, dan session edge.</div><AnalyticsCharts trades={done}/><AnalyticsTable trades={done} group="symbol" label="Symbol"/><AnalyticsTable trades={done} group="session" label="Session"/><AnalyticsTable trades={done} group="setup" label="Setup tag"/></>
 }
 
 function CalendarView({ trades, month, setMonth, onDay }: { trades: Trade[]; month: Date; setMonth: (value: Date) => void; onDay: (date: string) => void }) {
@@ -554,7 +783,7 @@ export default function TradenceApp() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   })
   const [storageReady, setStorageReady] = useState(false)
-  const [view, setView] = useState<View>('dashboard')
+  const [view, setView] = useState<View>('analytics')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Trade>(blankTrade)
@@ -568,7 +797,16 @@ export default function TradenceApp() {
   useEffect(() => {
     let active = true
     loadDatabaseState()
-      .then((saved) => { if (active && saved?.trades && saved.rules) setState(saved) })
+      .then((saved) => {
+        if (!active || !saved?.trades || !saved.rules) return
+        const isDemoDataset = saved.trades.length > 0 && saved.trades.every((trade) => trade.id.startsWith('demo-'))
+        if (isDemoDataset && localStorage.getItem(DEMO_VERSION_KEY) !== DEMO_VERSION) {
+          localStorage.setItem(DEMO_VERSION_KEY, DEMO_VERSION)
+          setState({ ...saved, trades: createDemoTrades() })
+          return
+        }
+        setState((current) => saved.trades.length === 0 && current.trades.length > 0 ? { ...saved, trades: current.trades } : saved)
+      })
       .catch(() => setToast('Penyimpanan browser tidak tersedia'))
       .finally(() => { if (active) setStorageReady(true) })
     return () => { active = false }
@@ -629,7 +867,7 @@ export default function TradenceApp() {
     <aside className="sidebar"><div className="brand brand-compact"><span className="brand-icon-wrap"><img className="brand-icon" src="/tradence-icon-v3.png" alt=""/></span><strong className="brand-title">Tradence<span>.</span></strong></div><nav>{navItems.map((item) => <button key={item.id} className={(view === item.id || (view === 'detail' && item.id === 'history')) ? 'active' : ''} onClick={() => { setEditing(false); setDayFilter(''); if (item.id === 'add') openAdd(); else go(item.id) }}><Icon name={item.icon}/><span>{item.label}</span><i className="nav-arrow">›</i></button>)}</nav><div className="sidebar-foot"><span>PERSONAL WORKSPACE</span><strong><i/> Akun USD · Local journal</strong><p>Data tersimpan aman di browser ini.</p></div></aside>
     <main className="main-content"><AppHeader view={view} theme={theme} onToggleTheme={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} onAdd={openAdd} onExport={exportBackup}/>
       <div className={`view-stage view-${view}`} key={view}>
-        {view === 'dashboard' && <DashboardView state={state} onSelect={openDetail} onHistory={() => go('history')} onDemo={() => { if (state.trades.length && !window.confirm('Ganti seluruh trade saat ini dengan 24 trade demo? Sebaiknya ekspor backup terlebih dahulu.')) return; const demo = createDemoTrades(); saveState({ ...state, trades: demo }); setMonth(new Date()); setToast(`${demo.length} trade demo dimuat`) }}/>} 
+        {view === 'dashboard' && <DashboardView state={state} onSelect={openDetail} onHistory={() => go('history')} onDemo={() => { if (state.trades.length && !window.confirm('Ganti seluruh trade saat ini dengan 24 trade demo? Sebaiknya ekspor backup terlebih dahulu.')) return; const demo = createDemoTrades(); localStorage.setItem(DEMO_VERSION_KEY, DEMO_VERSION); saveState({ ...state, trades: demo }); setMonth(new Date()); setToast(`${demo.length} trade demo dimuat`) }}/>} 
         {view === 'add' && <TradeFormView key={draft.id} draft={draft} setDraft={setDraft} allTrades={state.trades} rules={state.rules} onSave={saveTrade} onCancel={() => go(editing ? 'detail' : 'history')} editing={editing}/>} 
         {view === 'history' && <HistoryView trades={state.trades} query={query} setQuery={setQuery} status={status} setStatus={setStatus} dayFilter={dayFilter} clearDay={() => setDayFilter('')} onSelect={openDetail}/>} 
         {view === 'detail' && <DetailView trade={selectedTrade} allTrades={state.trades} rules={state.rules} onEdit={editTrade} onDelete={deleteTrade}/>} 

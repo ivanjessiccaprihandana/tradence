@@ -178,7 +178,7 @@ export function createDemoTrades(referenceDate = new Date()): Trade[] {
     const market = markets[index % markets.length]
     const direction: Direction = index % 3 === 0 || index % 7 === 0 ? 'SELL' : 'BUY'
     const sign = direction === 'BUY' ? 1 : -1
-    const opened = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), Math.max(1, referenceDate.getDate() - Math.floor((23 - index) * .72)), 7 + (index % 9), index % 2 ? 30 : 0)
+    const opened = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate() - Math.floor((23 - index) * 5.2), 7 + (index % 9), index % 2 ? 30 : 0)
     const closed = new Date(opened.getTime() + (45 + (index % 5) * 30) * 60000)
     const isOpen = multiple === null
     const isBreakEven = multiple === 0
